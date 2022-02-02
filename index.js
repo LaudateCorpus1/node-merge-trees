@@ -32,15 +32,8 @@ class MergeTrees {
     instrumentation.stop();
   }
 
-  _getMergedDirectory() {
-    let directoriesWithInputPaths = this.inputPaths.map(inputPath => ({
-      fsObject: makeFSObject(inputPath), // Directory object
-      inputPath: inputPath // remember for error reporting
-    }));
-    return this._getMergedDirectory2(directoriesWithInputPaths, "");
-  }
 
-  // Say we are recursing into the "foo" directory, which only exists in
+  // Say we are iterating into the "foo" directory, which only exists in
   // this.inputPaths[1] and this.inputPaths[2]. Then baseDir will be "foo/",
   // and directoriesWithInputPaths will be
   //
@@ -62,20 +55,62 @@ class MergeTrees {
   // Note that we must not use `fsObject.valueOf()` to report errors, because we
   // may have followed symlinks and thus the fsObject may not point into any of
   // the inputPaths.
-  _getMergedDirectory2(directoriesWithInputPaths, baseDir) {
-    // First, short-circuit on single input directory. This is particularly
-    // important for the recursive case: It means we only descend into
-    // subdirectories that exist in more than one input directory.
-    if (directoriesWithInputPaths.length === 1) {
-      return directoriesWithInputPaths[0].fsObject;
+  _getMergedDirectory() {
+    let initialDirectoriesWithInputPaths = this.inputPaths.map(inputPath => ({
+      fsObject: makeFSObject(inputPath), // Directory object
+      inputPath: inputPath // remember for error reporting
+    }));
+
+    let mergedOutput = new DirectoryIndex();
+
+    let jobs = [[initialDirectoriesWithInputPaths, "", null, mergedOutput]];
+
+    let job;
+
+    // eslint-disable-next-line no-cond-assign
+    while (job = jobs.pop()) {
+      const [directoriesWithInputPaths, basePath, parentFilename, parentOutput] = job;
+
+      if (directoriesWithInputPaths.length === 1) {
+        if (parentFilename) {
+          parentOutput.set(parentFilename, directoriesWithInputPaths[0].fsObject);
+        } else {
+          mergedOutput = directoriesWithInputPaths[0].fsObject;
+        }
+        continue;
+      }
+
+      let overwrite = this.options.overwrite;
+
+      let fileInfo = this._buildUpFileInfo(directoriesWithInputPaths, basePath, overwrite);
+
+      let currentOutput = !parentFilename ? parentOutput : new DirectoryIndex();
+
+      for (let [fileName, fsObjectsWithInputPaths] of fileInfo) {
+        if (fsObjectsWithInputPaths[0].fsObject instanceof Directory) {
+          jobs.unshift([fsObjectsWithInputPaths, `${basePath}${fileName}/`, fileName, currentOutput]);
+        } else {
+          // If there are multiple files, last one wins to get overwriting
+          // behavior.
+          let fsObject = fsObjectsWithInputPaths[fsObjectsWithInputPaths.length - 1].fsObject;
+
+          currentOutput.set(fileName, fsObject);
+        }
+      }
+
+      if (parentFilename) {
+        parentOutput.set(parentFilename, currentOutput);
+      }
     }
 
-    let overwrite = this.options.overwrite;
+    return mergedOutput;
+  }
 
-    // fileInfo maps file names to fsObjectWithInputPaths lists. These lists
-    // contain, for each instance of the file in the input directories, the
-    // FSObject for that file and the inputPath (from this.inputPaths) that it
-    // came from.
+  // fileInfo maps file names to fsObjectWithInputPaths lists. These lists
+  // contain, for each instance of the file in the input directories, the
+  // FSObject for that file and the inputPath (from this.inputPaths) that it
+  // came from.
+  _buildUpFileInfo(directoriesWithInputPaths, baseDir, overwrite) {
     let fileInfo = new Map();
 
     for (let directoryWithInputPath of directoriesWithInputPaths) {
@@ -126,24 +161,7 @@ class MergeTrees {
       }
     }
 
-    // Done guarding against all error conditions. Actually merge now.
-    let output = new DirectoryIndex();
-    for (let [fileName, fsObjectsWithInputPaths] of fileInfo) {
-      if (fsObjectsWithInputPaths[0].fsObject instanceof Directory) {
-        let subdirectory = this._getMergedDirectory2(
-          fsObjectsWithInputPaths,
-          `${baseDir}${fileName}/`
-        );
-        output.set(fileName, subdirectory);
-      } else {
-        // If there are multiple files, last one wins to get overwriting
-        // behavior.
-        let fsObject =
-          fsObjectsWithInputPaths[fsObjectsWithInputPaths.length - 1].fsObject;
-        output.set(fileName, fsObject);
-      }
-    }
-    return output;
+    return fileInfo;
   }
 }
 
